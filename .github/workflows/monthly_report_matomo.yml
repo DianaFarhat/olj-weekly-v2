@@ -1,0 +1,106 @@
+# Monthly report (Matomo) -- runs by itself on the 1st of every month at 09:00 Beirut time and emails last month's
+# report (Word + Excel) to each brand's list (SCHEDULED_RECIPIENTS in the notebook, or the variables below).
+# A manual "Run workflow" builds the same report; tick "send" to email it to TEST_RECIPIENTS only.
+#
+# Timing: GitHub schedules in UTC and Beirut changes its clock (UTC+3 in summer, UTC+2 in winter), so there
+# are two start times. Only the one that means 09:00 Beirut *today* goes ahead; the other stops right away.
+#
+# Needed in the repo (Settings -> Secrets and variables -> Actions):
+#   Secrets:   CMS_API_KEY, MATOMO_TOKEN, GSHEET_SA_KEY (the service account JSON: GA4, the acquisitions sheet),
+#              GMAIL_ADDRESS, GMAIL_APP_PASSWORD   (the same secrets as the weekly brief)
+#   Variables: MONTHLY_RECIPIENTS_OLJ, MONTHLY_RECIPIENTS_OT (optional; replace SCHEDULED_RECIPIENTS when set)
+
+name: "Monthly report · Matomo"
+
+on:
+  schedule:
+    - cron: "0 6 1 * *"   # 06:00 UTC = 09:00 Beirut in summer (UTC+3)
+    - cron: "0 7 1 * *"   # 07:00 UTC = 09:00 Beirut in winter (UTC+2)
+  workflow_dispatch:
+    inputs:
+      send:
+        description: "Email the reports (test runs only go to TEST_RECIPIENTS)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monthly-report
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check it's the right start time for today (summer / winter)
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHED: ${{ github.event.schedule }}
+        run: |
+          OFFSET=$(TZ=Asia/Beirut date +%z)
+          RUN=true
+          if [ "$EVENT" = "schedule" ]; then
+            RUN=false
+            if [ "$SCHED" = "0 6 1 * *" ] && [ "$OFFSET" = "+0300" ]; then RUN=true; fi
+            if [ "$SCHED" = "0 7 1 * *" ] && [ "$OFFSET" = "+0200" ]; then RUN=true; fi
+          fi
+          echo "Beirut offset $OFFSET, trigger '$EVENT' '$SCHED' -> run=$RUN"
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the repository
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python packages
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          pip install --quiet jupyter nbconvert ipykernel pandas numpy openpyxl requests matplotlib \
+            google-api-python-client google-auth google-auth-oauthlib google-analytics-data python-docx
+
+      - name: Write the service account key (GA4, the acquisitions Google Sheet)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GSHEET_SA_KEY: ${{ secrets.GSHEET_SA_KEY }}
+        run: printf '%s' "$GSHEET_SA_KEY" > service_account.json
+
+      - name: Run the notebook (builds and, when asked, emails the reports)
+        if: steps.gate.outputs.run == 'true'
+        env:
+          # scheduled run -> always send (to the brand lists); manual run -> only if "send" is ticked (test list)
+          SEND_EMAIL: ${{ (github.event_name == 'schedule' || inputs.send) && '1' || '' }}
+          CMS_API_KEY: ${{ secrets.CMS_API_KEY }}
+          MATOMO_TOKEN: ${{ secrets.MATOMO_TOKEN }}
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          MONTHLY_RECIPIENTS_OLJ: ${{ vars.MONTHLY_RECIPIENTS_OLJ }}
+          MONTHLY_RECIPIENTS_OT: ${{ vars.MONTHLY_RECIPIENTS_OT }}
+        run: |
+          jupyter nbconvert --to notebook --execute monthly_report_matomo.ipynb \
+            --output executed_monthly_report_matomo.ipynb --ExecutePreprocessor.timeout=-1
+
+      - name: Keep the outputs (executed notebook, Word reports, country Excel files)
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-report-${{ github.run_id }}
+          path: |
+            executed_monthly_report_matomo.ipynb
+            *.docx
+            *.Countries.xlsx
+          if-no-files-found: ignore
+          retention-days: 60
+
+      - name: Remove the service account key
+        if: always()
+        run: rm -f service_account.json

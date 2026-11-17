@@ -1,0 +1,19 @@
+# Credentials -- never commit (the workflows write service_account.json from the GSHEET_SA_KEY secret)
+service_account.json
+oauth_client_secret.json
+token.json
+token_gsc.json
+
+# Run outputs (kept as workflow artifacts instead)
+executed_*.ipynb
+*.docx
+*.Countries.xlsx
+Claude_translations_*.txt
+acquisitions_orders.csv
+acquisitions_daily_detail.csv
+acquisitions_vs_sheet_*.csv
+still_subscribed_check.csv
+
+# Python / Jupyter
+__pycache__/
+.ipynb_checkpoints/
